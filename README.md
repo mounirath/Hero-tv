@@ -28,16 +28,14 @@ Hero TV is a modern, high-performance IPTV and media stream player rewritten fro
 - **External Stream Support**:
   - Deep-linkable playback via query parameters: `?url=...&title=...&ua=...&autoplay=true`.
 
-## GitHub Actions Workflows
+## GitHub Actions Workflow
 
-Automated CI/CD pipelines configured in `.github/workflows/`:
+Configured in `.github/workflows/`:
 
 - **CI - Build & Test** (`.github/workflows/ci.yml`):
   - Runs on push / PR to `main` or `master`.
   - Installs dependencies and verifies TypeScript compilation and production build.
   - Uploads compiled production artifacts (`dist/`).
-- **Deploy to GitHub Pages** (`.github/workflows/deploy-pages.yml`):
-  - Automatically compiles and deploys the web app to GitHub Pages upon push.
 
 ## Getting Started
 
