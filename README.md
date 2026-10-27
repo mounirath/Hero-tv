@@ -28,10 +28,14 @@ Hero TV is a modern, high-performance IPTV and media stream player rewritten fro
 - **External Stream Support**:
   - Deep-linkable playback via query parameters: `?url=...&title=...&ua=...&autoplay=true`.
 
-## GitHub Actions Workflow
+## GitHub Actions Workflows
 
 Configured in `.github/workflows/`:
 
+- **Build Android APK** (`.github/workflows/build-apk.yml`):
+  - Automates building the Android APK (`hero-tv-debug.apk`) using Capacitor and Gradle.
+  - Automatically runs on push to `main` or manually via the "Run workflow" button.
+  - Uploads the installable APK file to GitHub Actions Artifacts (`Hero-TV-APK`).
 - **CI - Build & Test** (`.github/workflows/ci.yml`):
   - Runs on push / PR to `main` or `master`.
   - Installs dependencies and verifies TypeScript compilation and production build.

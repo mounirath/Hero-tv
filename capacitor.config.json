@@ -1,0 +1,8 @@
+{
+  "appId": "com.lite.herotv",
+  "appName": "Hero TV",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "https"
+  }
+}
