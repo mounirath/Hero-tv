@@ -1,0 +1,6 @@
+{
+  "name": "Hero TV",
+  "description": "Stream video and IPTV playlists with custom User-Agent, HLS playback, categories, and playback controls.",
+  "permissions": [],
+  "capabilities": []
+}
