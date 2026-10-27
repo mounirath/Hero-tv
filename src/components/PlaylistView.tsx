@@ -1,8 +1,21 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { Folder, Trash2, Loader2, Tv, Sparkles, RefreshCw, Download, Layers } from 'lucide-react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import {
+  Folder,
+  Trash2,
+  Loader2,
+  Tv,
+  Sparkles,
+  RefreshCw,
+  Download,
+  Upload,
+  AlertTriangle,
+  ShieldAlert,
+  Radio
+} from 'lucide-react';
 import { LinkItem, ChannelItem } from '../types';
-import { fetchPlaylistChannels } from '../services/m3uParser';
+import { fetchPlaylistChannels, parseM3U } from '../services/m3uParser';
 import { fetchStalkerChannels } from '../services/stalkerService';
+import { fetchXtreamChannels } from '../services/xtreamService';
 import { SAMPLE_PLAYLISTS } from '../services/sampleData';
 import { ExportModal } from './ExportModal';
 
@@ -36,17 +49,25 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
   const [exportTarget, setExportTarget] = useState<{ title: string; items: ChannelItem[] } | null>(null);
   const [loadingExportForUrl, setLoadingExportForUrl] = useState<string | null>(null);
 
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Helper to load channels according to playlist type (Xtream, Stalker, or M3U)
+  const loadChannelsForPlaylist = async (pl: LinkItem): Promise<ChannelItem[]> => {
+    if (pl.type === 'xtream' && pl.xtreamHost && pl.xtreamUser && pl.xtreamPass) {
+      return await fetchXtreamChannels(pl.xtreamHost, pl.xtreamUser, pl.xtreamPass);
+    }
+    if (pl.type === 'stalker' && pl.stalkerPortal && pl.stalkerMac) {
+      return await fetchStalkerChannels(pl.stalkerPortal, pl.stalkerMac);
+    }
+    return await fetchPlaylistChannels(pl.url, pl.userAgent);
+  };
+
   // Asynchronously get channel count for unselected playlists
   useEffect(() => {
     playlists.forEach(async (pl) => {
       if (channelCounts[pl.url] !== undefined) return;
       try {
-        let items: ChannelItem[] = [];
-        if (pl.type === 'stalker' && pl.stalkerPortal && pl.stalkerMac) {
-          items = await fetchStalkerChannels(pl.stalkerPortal, pl.stalkerMac);
-        } else {
-          items = await fetchPlaylistChannels(pl.url, pl.userAgent);
-        }
+        const items = await loadChannelsForPlaylist(pl);
         setChannelCounts(prev => ({ ...prev, [pl.url]: items.length }));
       } catch {
         setChannelCounts(prev => ({ ...prev, [pl.url]: 0 }));
@@ -68,14 +89,10 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
     setErrorChannels(null);
     setSelectedCategory(null);
 
-    const loaderPromise = selectedPlaylist.type === 'stalker' && selectedPlaylist.stalkerPortal && selectedPlaylist.stalkerMac
-      ? fetchStalkerChannels(selectedPlaylist.stalkerPortal, selectedPlaylist.stalkerMac)
-      : fetchPlaylistChannels(selectedPlaylist.url, selectedPlaylist.userAgent);
-
-    loaderPromise
+    loadChannelsForPlaylist(selectedPlaylist)
       .then((items) => {
         if (!isMounted) return;
-        const limited = items.slice(0, 500);
+        const limited = items.slice(0, 800);
         setChannels(limited);
         setLoadingChannels(false);
       })
@@ -113,18 +130,13 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
     e.stopPropagation();
     setLoadingExportForUrl(pl.url);
     try {
-      let items: ChannelItem[] = [];
-      if (pl.type === 'stalker' && pl.stalkerPortal && pl.stalkerMac) {
-        items = await fetchStalkerChannels(pl.stalkerPortal, pl.stalkerMac);
-      } else {
-        items = await fetchPlaylistChannels(pl.url, pl.userAgent);
-      }
+      const items = await loadChannelsForPlaylist(pl);
       setExportTarget({
         title: pl.title,
         items
       });
       setExportModalOpen(true);
-    } catch (err) {
+    } catch {
       alert("Impossible de charger les liens de cette playlist pour l'exportation.");
     } finally {
       setLoadingExportForUrl(null);
@@ -139,6 +151,27 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
       items: channels
     });
     setExportModalOpen(true);
+  };
+
+  // Direct local file override if remote IPTV server is blocked by CORS/Mixed Content
+  const handleDirectFileReplace = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const text = event.target?.result as string;
+      if (text) {
+        const parsed = parseM3U(text, selectedPlaylist?.url || '');
+        if (parsed.length > 0) {
+          setChannels(parsed.slice(0, 800));
+          setErrorChannels(null);
+        } else {
+          alert('Aucune chaîne valide trouvée dans ce fichier M3U.');
+        }
+      }
+    };
+    reader.readAsText(file);
   };
 
   // VIEW 1: Playlist List
@@ -380,21 +413,56 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
         </div>
       )}
 
-      {/* Error state */}
+      {/* Error state with Smart Vercel / Web Fallback */}
       {!loadingChannels && errorChannels && (
-        <div className="flex flex-col items-center justify-center py-20 px-4 text-center">
-          <p className="text-sm text-red-500 mb-3">{errorChannels}</p>
-          <button
-            onClick={() => {
-              const current = selectedPlaylist;
-              onSelectPlaylist(null);
-              setTimeout(() => onSelectPlaylist(current), 50);
-            }}
-            className="flex items-center gap-1.5 px-4 py-2 text-xs rounded-xl bg-[#059DFF] text-white"
-          >
-            <RefreshCw className="w-3.5 h-3.5" />
-            <span>Try Again</span>
-          </button>
+        <div className="flex flex-col items-center justify-center py-12 px-4 text-center max-w-md mx-auto">
+          <div className="w-12 h-12 rounded-full bg-red-500/10 flex items-center justify-center text-red-500 mb-3">
+            <ShieldAlert className="w-6 h-6" />
+          </div>
+
+          <p className="text-sm font-semibold text-red-500 mb-1.5">
+            Unable to load channels from this playlist.
+          </p>
+
+          <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-6 leading-relaxed">
+            Sur les navigateurs web et Vercel (HTTPS), les flux IPTV non sécurisés (HTTP) ou bloquant le partage CORS sont filtrés par sécurité.
+          </p>
+
+          <div className="flex flex-col gap-2.5 w-full">
+            {/* Try Again with other proxy */}
+            <button
+              onClick={() => {
+                const current = selectedPlaylist;
+                onSelectPlaylist(null);
+                setTimeout(() => onSelectPlaylist(current), 50);
+              }}
+              className="w-full h-11 flex items-center justify-center gap-2 px-4 text-xs font-semibold rounded-xl bg-[#059DFF] hover:bg-[#008be6] text-white transition-colors shadow-xs"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              <span>Réessayer avec un proxy alternatif</span>
+            </button>
+
+            {/* Direct Local File Load Fallback */}
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              className={`w-full h-11 flex items-center justify-center gap-2 px-4 text-xs font-semibold rounded-xl border transition-colors ${
+                darkMode
+                  ? 'border-zinc-700 bg-zinc-800 text-zinc-200 hover:border-[#059DFF]'
+                  : 'border-zinc-300 bg-zinc-50 text-zinc-800 hover:border-[#059DFF]'
+              }`}
+            >
+              <Upload className="w-3.5 h-3.5 text-[#059DFF]" />
+              <span>Charger le fichier M3U téléchargé</span>
+            </button>
+
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".m3u,.m3u8,.txt"
+              onChange={handleDirectFileReplace}
+              className="hidden"
+            />
+          </div>
         </div>
       )}
 

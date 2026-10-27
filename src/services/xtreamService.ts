@@ -6,7 +6,6 @@ export function cleanXtreamHost(host: string): string {
   if (!cleaned.startsWith('http://') && !cleaned.startsWith('https://')) {
     cleaned = 'http://' + cleaned;
   }
-  // Remove trailing slashes and player_api.php or get.php if user entered full url
   cleaned = cleaned.replace(/\/+$/, '');
   cleaned = cleaned.replace(/\/(player_api\.php|get\.php|c)$/i, '');
   return cleaned;
@@ -52,28 +51,36 @@ export interface XtreamServerInfo {
 }
 
 /**
- * Fetch helper using local proxy fallback to avoid CORS issues
+ * Fetch helper using local proxy and CORS proxy fallbacks
  */
 async function fetchWithCorsFallback(targetUrl: string): Promise<any> {
   const attempts = [
-    // 1. Direct fetch
-    async () => {
-      const res = await fetch(targetUrl, { signal: AbortSignal.timeout(6000) });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return await res.json();
-    },
-    // 2. Vite proxy
+    // 1. Vercel & Vite Serverless Proxy
     async () => {
       const proxyUrl = `/api/proxy?url=${encodeURIComponent(targetUrl)}`;
-      const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(8000) });
-      if (!res.ok) throw new Error(`Proxy HTTP ${res.status}`);
+      const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(12000) });
+      if (!res.ok) throw new Error(`Vercel Proxy HTTP ${res.status}`);
       return await res.json();
     },
-    // 3. Public CORS proxy
+    // 2. CorsProxy.io
     async () => {
-      const allOrigins = `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`;
-      const res = await fetch(allOrigins, { signal: AbortSignal.timeout(10000) });
-      if (!res.ok) throw new Error(`CORS proxy HTTP ${res.status}`);
+      const proxyUrl = `https://corsproxy.io/?url=${encodeURIComponent(targetUrl)}`;
+      const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(10000) });
+      if (!res.ok) throw new Error(`CorsProxy HTTP ${res.status}`);
+      return await res.json();
+    },
+    // 3. CodeTabs
+    async () => {
+      const proxyUrl = `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(targetUrl)}`;
+      const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(10000) });
+      if (!res.ok) throw new Error(`CodeTabs HTTP ${res.status}`);
+      return await res.json();
+    },
+    // 4. AllOrigins
+    async () => {
+      const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`;
+      const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(12000) });
+      if (!res.ok) throw new Error(`AllOrigins HTTP ${res.status}`);
       const text = await res.text();
       return JSON.parse(text);
     }
@@ -121,8 +128,12 @@ export async function testXtreamLogin(
         serverInfo: data.server_info
       };
     }
+  } catch (err: any) {
+    console.warn('testXtreamLogin API check failed:', err);
+  }
 
-    // If player_api returns text or unexpected format, test via m3u fetch
+  // Fallback: try fetching m3u directly
+  try {
     const m3uUrl = getXtreamM3uUrl(host, user, pass);
     const channels = await fetchPlaylistChannels(m3uUrl);
     if (channels.length > 0) {
@@ -135,43 +146,87 @@ export async function testXtreamLogin(
         }
       };
     }
+  } catch {}
 
-    return {
-      success: false,
-      message: 'Réponse inattendue du serveur Xtream.'
-    };
-  } catch (err: any) {
-    // Fallback: try fetching m3u directly
-    try {
-      const m3uUrl = getXtreamM3uUrl(host, user, pass);
-      const channels = await fetchPlaylistChannels(m3uUrl);
-      if (channels.length > 0) {
-        return {
-          success: true,
-          userInfo: {
-            username: user,
-            status: 'Active',
-            exp_date: null
-          }
-        };
-      }
-    } catch {}
-
-    return {
-      success: false,
-      message: 'Impossible de contacter le serveur Xtream. Vérifiez l’adresse Host, l’identifiant et le mot de passe.'
-    };
-  }
+  return {
+    success: false,
+    message: 'Impossible de contacter le serveur Xtream. Vérifiez l’adresse Host, l’identifiant et le mot de passe.'
+  };
 }
 
 /**
- * Fetch all channels, movies, and series from Xtream Codes server
+ * Fetch Xtream channels directly via player_api.php JSON (action=get_live_streams)
+ * Extremely reliable fallback when the huge M3U file cannot be downloaded.
+ */
+export async function fetchXtreamViaApi(
+  host: string,
+  user: string,
+  pass: string
+): Promise<ChannelItem[]> {
+  const cleanHost = cleanXtreamHost(host);
+
+  // 1. Fetch categories
+  const categoriesUrl = getXtreamApiUrl(cleanHost, user, pass, 'get_live_categories');
+  const catMap: Record<string, string> = {};
+  try {
+    const catData = await fetchWithCorsFallback(categoriesUrl);
+    if (Array.isArray(catData)) {
+      catData.forEach((c: any) => {
+        if (c.category_id && c.category_name) {
+          catMap[c.category_id.toString()] = c.category_name;
+        }
+      });
+    }
+  } catch (e) {
+    console.warn('Failed to load Xtream categories', e);
+  }
+
+  // 2. Fetch live streams
+  const streamsUrl = getXtreamApiUrl(cleanHost, user, pass, 'get_live_streams');
+  const streamsData = await fetchWithCorsFallback(streamsUrl);
+
+  if (!Array.isArray(streamsData)) {
+    throw new Error('Format de flux Xtream inattendu');
+  }
+
+  const u = encodeURIComponent(user.trim());
+  const p = encodeURIComponent(pass.trim());
+
+  return streamsData.map((s: any) => {
+    const streamId = s.stream_id;
+    const catName = (s.category_id && catMap[s.category_id.toString()]) || 'Chaînes TV';
+    const streamUrl = `${cleanHost}/live/${u}/${p}/${streamId}.m3u8`;
+
+    return {
+      name: s.name || `Channel ${streamId}`,
+      url: streamUrl,
+      category: catName,
+      logo: s.stream_icon || null,
+      tvgId: s.epg_channel_id || (streamId ? streamId.toString() : null),
+      streamId
+    };
+  });
+}
+
+/**
+ * Fetch all channels from Xtream Codes server (tries M3U Plus first, then JSON API fallback)
  */
 export async function fetchXtreamChannels(
   host: string,
   user: string,
   pass: string
 ): Promise<ChannelItem[]> {
-  const m3uUrl = getXtreamM3uUrl(host, user, pass);
-  return await fetchPlaylistChannels(m3uUrl, 'HeroTv/1.0 (Xtream)');
+  // Method 1: Try M3U Plus URL
+  try {
+    const m3uUrl = getXtreamM3uUrl(host, user, pass);
+    const channels = await fetchPlaylistChannels(m3uUrl, 'HeroTv/1.0 (Xtream)');
+    if (channels && channels.length > 0) {
+      return channels;
+    }
+  } catch (err) {
+    console.warn('[Hero TV] Xtream M3U Plus fetch failed, trying JSON player_api.php fallback...', err);
+  }
+
+  // Method 2: Try JSON player_api.php
+  return await fetchXtreamViaApi(host, user, pass);
 }
