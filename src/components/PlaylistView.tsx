@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Folder, Trash2, Loader2, Tv, Sparkles, RefreshCw } from 'lucide-react';
+import { Folder, Trash2, Loader2, Tv, Sparkles, RefreshCw, Download, Layers } from 'lucide-react';
 import { LinkItem, ChannelItem } from '../types';
 import { fetchPlaylistChannels } from '../services/m3uParser';
 import { SAMPLE_PLAYLISTS } from '../services/sampleData';
+import { ExportModal } from './ExportModal';
 
 interface PlaylistViewProps {
   playlists: LinkItem[];
@@ -28,6 +29,11 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
   const [errorChannels, setErrorChannels] = useState<string | null>(null);
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
   const [channelCounts, setChannelCounts] = useState<Record<string, number>>({});
+
+  // Export modal state
+  const [exportModalOpen, setExportModalOpen] = useState<boolean>(false);
+  const [exportTarget, setExportTarget] = useState<{ title: string; items: ChannelItem[] } | null>(null);
+  const [loadingExportForUrl, setLoadingExportForUrl] = useState<string | null>(null);
 
   // Asynchronously get channel count for unselected playlists
   useEffect(() => {
@@ -92,6 +98,34 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
     return channels.filter(ch => ch.category === selectedCategory);
   }, [channels, selectedCategory]);
 
+  // Handler to export channels from a specific playlist item in the list
+  const handleExportPlaylistCard = async (pl: LinkItem, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setLoadingExportForUrl(pl.url);
+    try {
+      const items = await fetchPlaylistChannels(pl.url, pl.userAgent);
+      setExportTarget({
+        title: pl.title,
+        items
+      });
+      setExportModalOpen(true);
+    } catch (err) {
+      alert("Impossible de charger les liens de cette playlist pour l'exportation.");
+    } finally {
+      setLoadingExportForUrl(null);
+    }
+  };
+
+  // Handler to export the currently active selected playlist
+  const handleExportSelectedPlaylist = () => {
+    if (!selectedPlaylist || channels.length === 0) return;
+    setExportTarget({
+      title: selectedPlaylist.title,
+      items: channels
+    });
+    setExportModalOpen(true);
+  };
+
   // VIEW 1: Playlist List
   if (!selectedPlaylist) {
     if (playlists.length === 0) {
@@ -126,15 +160,38 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
               </button>
             ))}
           </div>
+
+          {/* Export Modal rendered if open */}
+          {exportModalOpen && exportTarget && (
+            <ExportModal
+              playlistTitle={exportTarget.title}
+              channels={exportTarget.items}
+              onClose={() => {
+                setExportModalOpen(false);
+                setExportTarget(null);
+              }}
+              onPlayChannel={(channel) => onLaunchChannel(channel)}
+              darkMode={darkMode}
+            />
+          )}
         </div>
       );
     }
 
     return (
       <div className="w-full max-w-lg mx-auto pt-4 pb-28 px-4">
+        {/* Header with Title and Global Count */}
+        <div className="flex items-center justify-between mb-3 px-1">
+          <span className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">
+            {playlists.length} Playlist{playlists.length > 1 ? 's' : ''} enregistrée{playlists.length > 1 ? 's' : ''}
+          </span>
+        </div>
+
         <div className="space-y-3">
           {playlists.map((pl, idx) => {
             const count = channelCounts[pl.url];
+            const isExportingThis = loadingExportForUrl === pl.url;
+
             return (
               <div
                 key={idx}
@@ -156,22 +213,55 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                   </p>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onDeletePlaylist(pl.url);
-                  }}
-                  className="p-2 rounded-lg text-red-500 hover:bg-red-500/10 transition-colors"
-                  title="Remove playlist"
-                  aria-label="Remove"
-                >
-                  <Trash2 className="w-4 h-4" />
-                </button>
+                <div className="flex items-center gap-1">
+                  {/* Export Button on Card */}
+                  <button
+                    type="button"
+                    disabled={isExportingThis}
+                    onClick={(e) => handleExportPlaylistCard(pl, e)}
+                    className="p-2 rounded-lg text-[#059DFF] hover:bg-[#059DFF]/10 transition-colors flex items-center gap-1"
+                    title="Exporter les liens par catégorie"
+                    aria-label="Exporter"
+                  >
+                    {isExportingThis ? (
+                      <Loader2 className="w-4 h-4 animate-spin text-[#059DFF]" />
+                    ) : (
+                      <Download className="w-4 h-4" />
+                    )}
+                  </button>
+
+                  {/* Delete Button */}
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onDeletePlaylist(pl.url);
+                    }}
+                    className="p-2 rounded-lg text-red-500 hover:bg-red-500/10 transition-colors"
+                    title="Remove playlist"
+                    aria-label="Remove"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
               </div>
             );
           })}
         </div>
+
+        {/* Export Modal rendered if open */}
+        {exportModalOpen && exportTarget && (
+          <ExportModal
+            playlistTitle={exportTarget.title}
+            channels={exportTarget.items}
+            onClose={() => {
+              setExportModalOpen(false);
+              setExportTarget(null);
+            }}
+            onPlayChannel={(channel) => onLaunchChannel(channel)}
+            darkMode={darkMode}
+          />
+        )}
       </div>
     );
   }
@@ -179,6 +269,30 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
   // VIEW 2: Selected Playlist Channels Grid
   return (
     <div className="w-full max-w-2xl mx-auto pt-2 pb-28 px-3">
+      {/* Top Banner inside Playlist: Info + Exporter les liens action */}
+      <div className="flex items-center justify-between mb-3 px-1">
+        <div className="min-w-0 pr-2">
+          <h3 className={`text-sm font-bold truncate ${darkMode ? 'text-white' : 'text-zinc-900'}`}>
+            {selectedPlaylist.title}
+          </h3>
+          <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+            {categories.length} catégorie{categories.length > 1 ? 's' : ''} • {channels.length} lien{channels.length > 1 ? 's' : ''} (chaînes, films, séries)
+          </p>
+        </div>
+
+        {channels.length > 0 && !loadingChannels && (
+          <button
+            type="button"
+            onClick={handleExportSelectedPlaylist}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#059DFF] hover:bg-[#008be6] text-white text-xs font-semibold shadow-xs transition-colors flex-shrink-0"
+            title="Exporter les liens par catégorie"
+          >
+            <Download className="w-3.5 h-3.5" />
+            <span>Exporter</span>
+          </button>
+        )}
+      </div>
+
       {/* Category horizontal filter bar */}
       {!loadingChannels && categories.length > 0 && (
         <div className="flex items-center gap-2 overflow-x-auto pb-3 mb-3 scrollbar-none">
@@ -192,7 +306,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                   : 'border-zinc-300 bg-white text-zinc-700 hover:border-[#059DFF]'
             }`}
           >
-            All
+            All ({channels.length})
           </button>
           {categories.map((cat, idx) => (
             <button
@@ -266,7 +380,6 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                       src={channel.logo}
                       alt={channel.name}
                       onError={(e) => {
-                        // Fallback on image error
                         (e.target as HTMLElement).style.display = 'none';
                         const parent = (e.target as HTMLElement).parentElement;
                         if (parent) {
@@ -298,6 +411,20 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
             );
           })}
         </div>
+      )}
+
+      {/* Export Modal rendered if open */}
+      {exportModalOpen && exportTarget && (
+        <ExportModal
+          playlistTitle={exportTarget.title}
+          channels={exportTarget.items}
+          onClose={() => {
+            setExportModalOpen(false);
+            setExportTarget(null);
+          }}
+          onPlayChannel={(channel) => onLaunchChannel(channel, selectedPlaylist.userAgent)}
+          darkMode={darkMode}
+        />
       )}
     </div>
   );
