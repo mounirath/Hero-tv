@@ -1,9 +1,24 @@
+export type PlaylistType = 'm3u' | 'xtream' | 'stalker' | 'direct';
+
 export interface LinkItem {
   id?: string;
   title: string;
   url: string;
+  type?: PlaylistType;
   userAgent?: string | null;
   channelCount?: number;
+
+  // Xtream Codes API metadata
+  xtreamHost?: string;
+  xtreamUser?: string;
+  xtreamPass?: string;
+  xtreamExpDate?: string | null;
+  xtreamStatus?: string | null;
+
+  // Stalker Portal (MAG) metadata
+  stalkerPortal?: string;
+  stalkerMac?: string;
+  stalkerToken?: string | null;
 }
 
 export interface ChannelItem {
@@ -12,6 +27,8 @@ export interface ChannelItem {
   category?: string | null;
   logo?: string | null;
   tvgId?: string | null;
+  streamId?: string | number | null;
+  containerExtension?: string | null;
 }
 
 export interface PlaybackState {

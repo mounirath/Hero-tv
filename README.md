@@ -4,11 +4,11 @@ Hero TV is a modern, high-performance IPTV and media stream player rewritten fro
 
 ## Features
 
-- **Stream & Playlist Management**:
-  - Add individual stream URLs (HLS `.m3u8`, MP4, WebM, etc.) or full M3U/M3U8 IPTV playlists.
-  - Custom User-Agent support for streams that require specific player headers.
-  - Automatic parsing of M3U playlists with channel metadata, categories, and channel logos.
-  - Category filtering tabs and 3-column channel grid.
+- **Multi-Protocol IPTV Connections**:
+  - **Extrême IPTV (Xtream Codes API)**: Connexion via Host/Serveur, Username, Password avec validation automatique, date d'expiration et statut du compte.
+  - **Playlists M3U / M3U8**: URL en ligne ou import direct de fichier local `.m3u` / `.m3u8` avec détection automatique des logos et catégories.
+  - **Portails Stalker (MAG Middleware)**: Connexion via URL de portail et adresse MAC (`00:1A:79:XX:XX:XX`) avec générateur d'adresse MAC intégré.
+  - **Flux direct**: Lecture immédiate de liens HLS `.m3u8`, MP4, MKV avec User-Agent personnalisable.
 - **Export Links by Category (Chaînes, Films, Séries)**:
   - Export stream URLs categorized by channels, movies (VOD), and TV series.
   - Export formats: M3U/M3U8 playlist, structured JSON, Markdown/Text list, and CSV.

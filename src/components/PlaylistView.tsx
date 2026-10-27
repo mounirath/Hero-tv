@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { Folder, Trash2, Loader2, Tv, Sparkles, RefreshCw, Download, Layers } from 'lucide-react';
 import { LinkItem, ChannelItem } from '../types';
 import { fetchPlaylistChannels } from '../services/m3uParser';
+import { fetchStalkerChannels } from '../services/stalkerService';
 import { SAMPLE_PLAYLISTS } from '../services/sampleData';
 import { ExportModal } from './ExportModal';
 
@@ -40,7 +41,12 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
     playlists.forEach(async (pl) => {
       if (channelCounts[pl.url] !== undefined) return;
       try {
-        const items = await fetchPlaylistChannels(pl.url, pl.userAgent);
+        let items: ChannelItem[] = [];
+        if (pl.type === 'stalker' && pl.stalkerPortal && pl.stalkerMac) {
+          items = await fetchStalkerChannels(pl.stalkerPortal, pl.stalkerMac);
+        } else {
+          items = await fetchPlaylistChannels(pl.url, pl.userAgent);
+        }
         setChannelCounts(prev => ({ ...prev, [pl.url]: items.length }));
       } catch {
         setChannelCounts(prev => ({ ...prev, [pl.url]: 0 }));
@@ -62,7 +68,11 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
     setErrorChannels(null);
     setSelectedCategory(null);
 
-    fetchPlaylistChannels(selectedPlaylist.url, selectedPlaylist.userAgent)
+    const loaderPromise = selectedPlaylist.type === 'stalker' && selectedPlaylist.stalkerPortal && selectedPlaylist.stalkerMac
+      ? fetchStalkerChannels(selectedPlaylist.stalkerPortal, selectedPlaylist.stalkerMac)
+      : fetchPlaylistChannels(selectedPlaylist.url, selectedPlaylist.userAgent);
+
+    loaderPromise
       .then((items) => {
         if (!isMounted) return;
         const limited = items.slice(0, 500);
@@ -103,7 +113,12 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
     e.stopPropagation();
     setLoadingExportForUrl(pl.url);
     try {
-      const items = await fetchPlaylistChannels(pl.url, pl.userAgent);
+      let items: ChannelItem[] = [];
+      if (pl.type === 'stalker' && pl.stalkerPortal && pl.stalkerMac) {
+        items = await fetchStalkerChannels(pl.stalkerPortal, pl.stalkerMac);
+      } else {
+        items = await fetchPlaylistChannels(pl.url, pl.userAgent);
+      }
       setExportTarget({
         title: pl.title,
         items
@@ -201,16 +216,47 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                 onClick={() => onSelectPlaylist(pl)}
               >
                 <div className="flex-1 min-w-0 pr-3">
-                  <h4 className={`text-sm font-semibold truncate ${
-                    darkMode ? 'text-white' : 'text-zinc-900'
-                  }`}>
-                    {pl.title}
-                  </h4>
-                  <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
-                    {count !== undefined
-                      ? `${count} channel${count === 1 ? '' : 's'}`
-                      : 'Loading channels…'}
-                  </p>
+                  <div className="flex items-center gap-2 mb-1">
+                    <h4 className={`text-sm font-semibold truncate ${
+                      darkMode ? 'text-white' : 'text-zinc-900'
+                    }`}>
+                      {pl.title}
+                    </h4>
+                    {pl.type === 'xtream' && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded-md font-semibold bg-emerald-500/15 text-emerald-500 border border-emerald-500/30 flex-shrink-0">
+                        Xtream
+                      </span>
+                    )}
+                    {pl.type === 'stalker' && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded-md font-semibold bg-purple-500/15 text-purple-500 border border-purple-500/30 flex-shrink-0">
+                        Stalker MAG
+                      </span>
+                    )}
+                    {(!pl.type || pl.type === 'm3u') && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded-md font-semibold bg-[#059DFF]/15 text-[#059DFF] border border-[#059DFF]/30 flex-shrink-0">
+                        M3U
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
+                    <span>
+                      {count !== undefined
+                        ? `${count} chaîne${count > 1 ? 's' : ''}`
+                        : 'Chargement des chaînes…'}
+                    </span>
+                    {pl.xtreamExpDate && (
+                      <>
+                        <span>•</span>
+                        <span className="text-[11px] text-amber-500">Exp : {pl.xtreamExpDate}</span>
+                      </>
+                    )}
+                    {pl.stalkerMac && (
+                      <>
+                        <span>•</span>
+                        <span className="text-[10px] font-mono">{pl.stalkerMac}</span>
+                      </>
+                    )}
+                  </div>
                 </div>
 
                 <div className="flex items-center gap-1">
