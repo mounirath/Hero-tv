@@ -3,17 +3,24 @@ import Hls from 'hls.js';
 import {
   Play,
   Pause,
-  Repeat,
-  Crop,
-  MoreVertical,
-  Cast,
   ArrowLeft,
-  Maximize2,
-  Minimize2,
+  Settings,
   Volume2,
   VolumeX,
-  X,
-  AlertTriangle
+  Maximize,
+  Minimize,
+  RotateCcw,
+  FastForward,
+  MoreVertical,
+  Cast,
+  Tv,
+  AlertTriangle,
+  RefreshCw,
+  ExternalLink,
+  Copy,
+  Check,
+  ShieldCheck,
+  Smartphone
 } from 'lucide-react';
 import { AspectRatioMode } from '../types';
 
@@ -23,8 +30,8 @@ interface PlaybackViewProps {
   userAgent?: string | null;
   subtitleUrl?: string | null;
   subtitleLang?: string | null;
-  onClose: () => void;
   autoPlay?: boolean;
+  onClose: () => void;
 }
 
 export const PlaybackView: React.FC<PlaybackViewProps> = ({
@@ -32,32 +39,42 @@ export const PlaybackView: React.FC<PlaybackViewProps> = ({
   title,
   userAgent,
   subtitleUrl,
-  subtitleLang = 'en',
-  onClose,
-  autoPlay = true
+  subtitleLang,
+  autoPlay = true,
+  onClose
 }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const hlsRef = useRef<Hls | null>(null);
   const hideTimerRef = useRef<number | null>(null);
 
+  // Player state
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
-  const [positionSec, setPositionSec] = useState<number>(0);
-  const [durationSec, setDurationSec] = useState<number>(0);
+  const [isBuffering, setIsBuffering] = useState<boolean>(true);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [errorDetails, setErrorDetails] = useState<string | null>(null);
   const [isLive, setIsLive] = useState<boolean>(false);
-  const [loopEnabled, setLoopEnabled] = useState<boolean>(false);
+  const [durationSec, setDurationSec] = useState<number>(0);
+  const [positionSec, setPositionSec] = useState<number>(0);
+  const [isMuted, setIsMuted] = useState<boolean>(false);
+  const [volume, setVolume] = useState<number>(1);
+  const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
+  const [overlayVisible, setOverlayVisible] = useState<boolean>(true);
+  const [copiedLink, setCopiedLink] = useState<boolean>(false);
+
+  // Playback options (matching PlaybackActivity.kt)
   const [aspectMode, setAspectMode] = useState<AspectRatioMode>('FIT');
+  const [loopEnabled, setLoopEnabled] = useState<boolean>(false);
+  const [showSettings, setShowSettings] = useState<boolean>(false);
   const [selectedSpeed, setSelectedSpeed] = useState<number>(1.0);
   const [selectedQuality, setSelectedQuality] = useState<string>('Auto');
-  const [showSettings, setShowSettings] = useState<boolean>(false);
-  const [overlayVisible, setOverlayVisible] = useState<boolean>(true);
-  const [isMuted, setIsMuted] = useState<boolean>(false);
-  const [volume, setVolume] = useState<number>(1.0);
-  const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [isBuffering, setIsBuffering] = useState<boolean>(true);
 
-  // Setup auto-hide controls after 5 seconds of inactivity (matching PlaybackActivity.kt)
+  // Track retry attempt mode
+  // 'auto' -> 'proxy' -> 'direct'
+  const [playbackAttempt, setPlaybackAttempt] = useState<number>(0);
+  const [forcedMode, setForcedMode] = useState<'auto' | 'proxy' | 'direct'>('auto');
+
+  // Setup auto-hide controls after 5 seconds of inactivity
   const resetHideTimer = () => {
     setOverlayVisible(true);
     if (hideTimerRef.current) {
@@ -88,45 +105,89 @@ export const PlaybackView: React.FC<PlaybackViewProps> = ({
     return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
   };
 
+  // Convert raw stream url to appropriate format based on environment
+  const resolveTargetStreamUrl = (raw: string, mode: 'auto' | 'proxy' | 'direct'): { streamUrl: string; isProxied: boolean } => {
+    let clean = raw.trim();
+
+    // If it's an Xtream live stream ending in .ts, rewrite to .m3u8 for Hls.js
+    if (clean.includes('/live/') && clean.endsWith('.ts')) {
+      clean = clean.replace(/\.ts$/, '.m3u8');
+    }
+
+    const isHttpsOrigin = typeof window !== 'undefined' && window.location.protocol === 'https:';
+    const isHttpStream = clean.startsWith('http://');
+
+    // If forced to proxy OR on HTTPS and stream is HTTP, proxy through serverless function
+    const shouldProxy = mode === 'proxy' || (mode === 'auto' && (isHttpsOrigin || !!userAgent));
+
+    if (shouldProxy && !clean.startsWith('/api/proxy')) {
+      const proxyUrl = `/api/proxy?url=${encodeURIComponent(clean)}${userAgent ? `&ua=${encodeURIComponent(userAgent)}` : ''}`;
+      return { streamUrl: proxyUrl, isProxied: true };
+    }
+
+    return { streamUrl: clean, isProxied: false };
+  };
+
   // Video initialization with HLS.js or native HTML5
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
 
     setErrorMessage(null);
+    setErrorDetails(null);
     setIsBuffering(true);
 
-    const isHlsUrl = url.toLowerCase().includes('.m3u8') || url.toLowerCase().includes('m3u8');
+    const { streamUrl, isProxied } = resolveTargetStreamUrl(url, forcedMode);
 
-    if (isHlsUrl && Hls.isSupported()) {
+    console.log(`[Hero TV] Initializing playback for:`, {
+      originalUrl: url,
+      effectiveUrl: streamUrl,
+      forcedMode,
+      isProxied
+    });
+
+    const isHls =
+      streamUrl.toLowerCase().includes('.m3u8') ||
+      streamUrl.toLowerCase().includes('m3u8') ||
+      streamUrl.includes('/live/') ||
+      streamUrl.includes('output=m3u8') ||
+      isProxied;
+
+    let hlsInstance: Hls | null = null;
+
+    if (isHls && Hls.isSupported()) {
       if (hlsRef.current) {
         hlsRef.current.destroy();
       }
 
-      const hls = new Hls({
+      hlsInstance = new Hls({
         enableWorker: true,
         lowLatencyMode: true,
         backBufferLength: 90,
-        xhrSetup: (xhr, u) => {
-          if (userAgent) {
+        maxBufferLength: 30,
+        maxMaxBufferLength: 60,
+        manifestLoadingTimeOut: 15000,
+        manifestLoadingMaxRetry: 3,
+        levelLoadingTimeOut: 15000,
+        fragLoadingTimeOut: 20000,
+        xhrSetup: (xhr) => {
+          if (userAgent && !isProxied) {
             try {
               xhr.setRequestHeader('User-Agent', userAgent);
-            } catch {
-              // Browser may restrict forbidden headers
-            }
+            } catch {}
           }
         }
       });
-      hlsRef.current = hls;
 
-      hls.loadSource(url);
-      hls.attachMedia(video);
+      hlsRef.current = hlsInstance;
 
-      hls.on(Hls.Events.MANIFEST_PARSED, (_, data) => {
+      hlsInstance.loadSource(streamUrl);
+      hlsInstance.attachMedia(video);
+
+      hlsInstance.on(Hls.Events.MANIFEST_PARSED, () => {
         setIsBuffering(false);
         if (autoPlay) {
           video.play().catch(() => {
-            // Autoplay with sound might be blocked, retry muted
             video.muted = true;
             setIsMuted(true);
             video.play().catch(e => console.warn('Autoplay failed', e));
@@ -134,7 +195,7 @@ export const PlaybackView: React.FC<PlaybackViewProps> = ({
         }
       });
 
-      hls.on(Hls.Events.LEVEL_LOADED, (_, data) => {
+      hlsInstance.on(Hls.Events.LEVEL_LOADED, (_, data) => {
         setIsLive(data.details.live);
         if (data.details.live) {
           setDurationSec(0);
@@ -143,35 +204,38 @@ export const PlaybackView: React.FC<PlaybackViewProps> = ({
         }
       });
 
-      hls.on(Hls.Events.ERROR, (_, data) => {
-        console.warn('HLS error:', data);
+      hlsInstance.on(Hls.Events.ERROR, (_, data) => {
+        console.warn('[Hero TV] HLS event error:', data);
         if (data.fatal) {
           switch (data.type) {
             case Hls.ErrorTypes.NETWORK_ERROR:
-              // Try proxy fallback if network or CORS failed
-              if (!url.startsWith('/api/proxy') && !url.includes('allorigins')) {
-                console.log('Falling back to proxy for HLS stream...');
-                const proxyUrl = `/api/proxy?url=${encodeURIComponent(url)}${userAgent ? `&ua=${encodeURIComponent(userAgent)}` : ''}`;
-                hls.loadSource(proxyUrl);
-                hls.startLoad();
-              } else {
-                hls.startLoad();
+              // If failed on direct attempt, auto-retry with proxy
+              if (forcedMode === 'direct') {
+                console.log('[Hero TV] Direct mode failed, auto-retrying via proxy...');
+                setForcedMode('proxy');
+                return;
               }
+              hlsInstance?.startLoad();
               break;
             case Hls.ErrorTypes.MEDIA_ERROR:
-              hls.recoverMediaError();
+              hlsInstance?.recoverMediaError();
               break;
             default:
-              hls.destroy();
-              setErrorMessage('Failed to play stream. The stream may be offline or restricted.');
+              hlsInstance?.destroy();
               setIsBuffering(false);
+              setErrorMessage('Playback error. Please check your stream URL or connection.');
+              setErrorDetails(
+                isProxied
+                  ? 'Le serveur IPTV ne répond pas ou a rejeté la requête du proxy.'
+                  : 'Requête bloquée par le navigateur (CORS / Mixed Content). Essayez le proxy sécurisé.'
+              );
               break;
           }
         }
       });
     } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-      // Native Safari HLS
-      video.src = url;
+      // Native Apple HLS (Safari iOS/macOS)
+      video.src = streamUrl;
       if (autoPlay) {
         video.play().catch(() => {
           video.muted = true;
@@ -180,8 +244,8 @@ export const PlaybackView: React.FC<PlaybackViewProps> = ({
         });
       }
     } else {
-      // Standard video file (mp4, webm, etc.)
-      video.src = url;
+      // Direct video container (mp4, webm, or direct browser stream)
+      video.src = streamUrl;
       if (autoPlay) {
         video.play().catch(() => {
           video.muted = true;
@@ -200,10 +264,22 @@ export const PlaybackView: React.FC<PlaybackViewProps> = ({
       }
     };
     const onWaiting = () => setIsBuffering(true);
-    const onPlaying = () => setIsBuffering(false);
+    const onPlaying = () => {
+      setIsBuffering(false);
+      setErrorMessage(null);
+    };
     const onError = () => {
       setIsBuffering(false);
+      // If direct mode failed on video element, auto-retry with proxy
+      if (forcedMode === 'auto') {
+        console.log('[Hero TV] Native error, retrying via proxy...');
+        setForcedMode('proxy');
+        return;
+      }
       setErrorMessage('Playback error. Please check your stream URL or connection.');
+      setErrorDetails(
+        'Le flux n’a pas pu être décodé par le navigateur. Certains serveurs IPTV requièrent un lecteur natif (VLC / MX Player).'
+      );
     };
 
     video.addEventListener('play', onPlay);
@@ -225,7 +301,7 @@ export const PlaybackView: React.FC<PlaybackViewProps> = ({
       video.removeEventListener('playing', onPlaying);
       video.removeEventListener('error', onError);
     };
-  }, [url, userAgent, autoPlay]);
+  }, [url, userAgent, autoPlay, forcedMode, playbackAttempt]);
 
   // Loop mode effect
   useEffect(() => {
@@ -259,60 +335,70 @@ export const PlaybackView: React.FC<PlaybackViewProps> = ({
         return 'aspect-[4/3] max-h-full max-w-full object-contain';
       case 'FIT':
       default:
-        return 'w-full h-full object-contain';
+        return 'max-h-full max-w-full object-contain';
     }
   };
 
-  // Play / Pause toggle
-  const togglePlayPause = () => {
+  const togglePlay = () => {
     const video = videoRef.current;
     if (!video) return;
     if (video.paused) {
-      video.play().catch(e => console.warn(e));
+      video.play().catch(() => {});
     } else {
       video.pause();
     }
     resetHideTimer();
   };
 
-  // Seek handler
+  const toggleMute = () => {
+    const video = videoRef.current;
+    if (!video) return;
+    const nextMuted = !isMuted;
+    video.muted = nextMuted;
+    setIsMuted(nextMuted);
+    if (!nextMuted && volume === 0) {
+      video.volume = 1;
+      setVolume(1);
+    }
+    resetHideTimer();
+  };
+
   const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const target = parseFloat(e.target.value);
-    setPositionSec(target);
-    if (videoRef.current && isFinite(target)) {
-      videoRef.current.currentTime = target;
-    }
+    const video = videoRef.current;
+    if (!video || isLive) return;
+    const targetTime = parseFloat(e.target.value);
+    video.currentTime = targetTime;
+    setPositionSec(targetTime);
     resetHideTimer();
   };
 
-  // Fullscreen toggle
-  const toggleFullscreen = () => {
-    if (!containerRef.current) return;
-    if (!document.fullscreenElement) {
-      containerRef.current.requestFullscreen?.().catch(() => {});
-      setIsFullscreen(true);
-    } else {
-      document.exitFullscreen?.().catch(() => {});
-      setIsFullscreen(false);
-    }
-    resetHideTimer();
-  };
-
-  // Apply Quality Preset
-  const handleApplyQuality = (choice: string) => {
-    setSelectedQuality(choice);
-    const hls = hlsRef.current;
-    if (hls && hls.levels && hls.levels.length > 0) {
-      if (choice === 'Auto') {
-        hls.currentLevel = -1;
-      } else if (choice === 'Medium') {
-        const midIdx = Math.floor(hls.levels.length / 2);
-        hls.currentLevel = midIdx;
-      } else if (choice === 'Low') {
-        hls.currentLevel = 0;
+  const toggleFullscreen = async () => {
+    const container = containerRef.current;
+    if (!container) return;
+    try {
+      if (!document.fullscreenElement) {
+        await container.requestFullscreen();
+        setIsFullscreen(true);
+      } else {
+        await document.exitFullscreen();
+        setIsFullscreen(false);
       }
+    } catch (e) {
+      console.warn('Fullscreen toggle failed', e);
     }
     resetHideTimer();
+  };
+
+  const handleCopyLink = () => {
+    navigator.clipboard.writeText(url);
+    setCopiedLink(true);
+    setTimeout(() => setCopiedLink(false), 2000);
+  };
+
+  const handleOpenVlc = () => {
+    // VLC protocol URL: vlc://http://... or direct intent on Android
+    const vlcUrl = `vlc://${url.replace(/^https?:\/\//i, '')}`;
+    window.location.href = vlcUrl;
   };
 
   return (
@@ -347,156 +433,196 @@ export const PlaybackView: React.FC<PlaybackViewProps> = ({
         </div>
       )}
 
-      {/* Error State Banner */}
+      {/* Advanced In-Player Error Screen */}
       {errorMessage && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/85 z-20 px-6 text-center">
-          <AlertTriangle className="w-12 h-12 text-red-500 mb-3" />
-          <h3 className="text-white text-base font-semibold mb-2">Stream Unavailable</h3>
-          <p className="text-zinc-400 text-xs max-w-sm mb-6">{errorMessage}</p>
-          <div className="flex gap-3">
+        <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/90 z-20 px-4 text-center max-w-md mx-auto">
+          <div className="w-14 h-14 rounded-full bg-red-500/10 flex items-center justify-center text-red-500 mb-3.5 border border-red-500/20">
+            <AlertTriangle className="w-7 h-7" />
+          </div>
+
+          <h3 className="text-white text-base font-bold mb-1.5">
+            Playback error. Please check your stream URL or connection.
+          </h3>
+
+          <p className="text-zinc-400 text-xs mb-5 leading-relaxed">
+            {errorDetails ||
+              "Ce flux n'a pas pu être chargé directement. Les navigateurs bloquent souvent les flux IPTV HTTP sur les sites HTTPS."}
+          </p>
+
+          {/* Quick Actions */}
+          <div className="flex flex-col gap-2 w-full max-w-xs">
+            {/* Action 1: Force Secure Proxy */}
             <button
               onClick={() => {
                 setErrorMessage(null);
-                const video = videoRef.current;
-                if (video) {
-                  video.load();
-                  video.play().catch(() => {});
-                }
+                setForcedMode('proxy');
+                setPlaybackAttempt(prev => prev + 1);
               }}
-              className="px-4 py-2 rounded-xl bg-[#059DFF] text-white text-xs font-medium"
+              className="w-full h-10 px-4 rounded-xl bg-[#059DFF] hover:bg-[#008be6] text-white text-xs font-semibold flex items-center justify-center gap-2 transition-colors shadow-sm"
             >
-              Retry
+              <ShieldCheck className="w-4 h-4" />
+              <span>Lire via le Proxy Sécurisé</span>
             </button>
+
+            {/* Action 2: Direct Mode */}
             <button
-              onClick={onClose}
-              className="px-4 py-2 rounded-xl bg-zinc-800 text-zinc-300 text-xs font-medium hover:bg-zinc-700"
+              onClick={() => {
+                setErrorMessage(null);
+                setForcedMode('direct');
+                setPlaybackAttempt(prev => prev + 1);
+              }}
+              className="w-full h-10 px-4 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-medium flex items-center justify-center gap-2 transition-colors"
             >
-              Back to Hero TV
+              <RefreshCw className="w-3.5 h-3.5" />
+              <span>Tester en Mode Direct</span>
             </button>
+
+            {/* Action 3: Open in External VLC / Android Player */}
+            <button
+              onClick={handleOpenVlc}
+              className="w-full h-10 px-4 rounded-xl border border-zinc-700 hover:border-[#059DFF] text-zinc-300 text-xs font-medium flex items-center justify-center gap-2 transition-colors"
+            >
+              <Smartphone className="w-3.5 h-3.5 text-amber-400" />
+              <span>Ouvrir dans VLC (Android / PC)</span>
+            </button>
+
+            {/* Action 4: Copy link & Back */}
+            <div className="flex gap-2 pt-1">
+              <button
+                onClick={handleCopyLink}
+                className="flex-1 h-9 rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-white text-[11px] font-medium flex items-center justify-center gap-1.5 transition-colors"
+              >
+                {copiedLink ? (
+                  <>
+                    <Check className="w-3.5 h-3.5 text-emerald-400" />
+                    <span className="text-emerald-400">Lien copié</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-3.5 h-3.5" />
+                    <span>Copier l’URL</span>
+                  </>
+                )}
+              </button>
+
+              <button
+                onClick={onClose}
+                className="flex-1 h-9 rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-white text-[11px] font-medium flex items-center justify-center transition-colors"
+              >
+                Retour à Hero TV
+              </button>
+            </div>
           </div>
         </div>
       )}
 
       {/* Overlay Controls */}
       <div
-        className={`absolute inset-0 flex flex-col justify-between p-4 sm:p-6 transition-opacity duration-300 pointer-events-auto bg-gradient-to-t from-black/80 via-transparent to-black/70 ${
-          overlayVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'
+        className={`absolute inset-0 flex flex-col justify-between p-4 bg-gradient-to-t from-black/80 via-transparent to-black/80 transition-opacity duration-300 pointer-events-none ${
+          overlayVisible && !errorMessage ? 'opacity-100' : 'opacity-0'
         }`}
-        onClick={(e) => {
-          // If clicking overlay background (not button), toggle overlay
-          if (e.target === e.currentTarget) {
-            setOverlayVisible(!overlayVisible);
-          }
-        }}
       >
-        {/* TOP BAR: Back button, Stream Title, Cast/Fullscreen */}
-        <div className="flex items-center justify-between w-full">
-          <button
-            onClick={onClose}
-            className="p-2.5 rounded-full bg-black/40 hover:bg-black/60 text-white backdrop-blur-sm transition-colors"
-            title="Exit Player"
-            aria-label="Back"
-          >
-            <ArrowLeft className="w-5 h-5" />
-          </button>
-
-          <h2 className="text-white text-base sm:text-lg font-semibold tracking-wide truncate max-w-md px-4 text-center">
-            {title}
-          </h2>
+        {/* TOP CONTROLS BAR */}
+        <div className="flex items-center justify-between w-full pointer-events-auto">
+          <div className="flex items-center gap-3">
+            <button
+              onClick={onClose}
+              className="p-2 rounded-full bg-black/40 text-white hover:bg-black/70 backdrop-blur-xs transition-colors"
+              title="Retour"
+              aria-label="Back"
+            >
+              <ArrowLeft className="w-5 h-5" />
+            </button>
+            <h2 className="text-white text-sm font-semibold tracking-wide drop-shadow-md truncate max-w-[200px] sm:max-w-md">
+              {title}
+            </h2>
+          </div>
 
           <div className="flex items-center gap-2">
+            {/* Cast button */}
             <button
               onClick={() => {
-                // Browser Cast API or message
-                alert("Chromecast is active on your network. Tap Cast in browser menu to send to TV.");
+                if ('presentation' in navigator) {
+                  alert('Scanning for Cast displays…');
+                } else {
+                  alert('Cast API is ready for connected displays.');
+                }
               }}
-              className="p-2.5 rounded-full bg-black/40 hover:bg-black/60 text-white backdrop-blur-sm transition-colors"
+              className="p-2 rounded-full bg-black/40 text-white hover:bg-black/70 backdrop-blur-xs transition-colors"
               title="Cast to TV"
               aria-label="Cast"
             >
-              <Cast className="w-5 h-5" />
+              <Cast className="w-4 h-4" />
             </button>
 
+            {/* Loop button */}
             <button
-              onClick={toggleFullscreen}
-              className="p-2.5 rounded-full bg-black/40 hover:bg-black/60 text-white backdrop-blur-sm transition-colors"
-              title={isFullscreen ? "Exit Fullscreen" : "Fullscreen"}
-              aria-label="Fullscreen"
+              onClick={() => {
+                setLoopEnabled(!loopEnabled);
+                resetHideTimer();
+              }}
+              className={`p-2 rounded-full backdrop-blur-xs transition-colors ${
+                loopEnabled ? 'bg-[#059DFF] text-white' : 'bg-black/40 text-white/80 hover:bg-black/70'
+              }`}
+              title={loopEnabled ? 'Repeat On' : 'Repeat Off'}
+              aria-label="Loop"
             >
-              {isFullscreen ? <Minimize2 className="w-5 h-5" /> : <Maximize2 className="w-5 h-5" />}
+              <RotateCcw className="w-4 h-4" />
+            </button>
+
+            {/* Aspect Ratio Cycler */}
+            <button
+              onClick={cycleAspectRatio}
+              className="px-2.5 py-1.5 rounded-full bg-black/40 text-white hover:bg-black/70 backdrop-blur-xs text-xs font-bold tracking-wider transition-colors"
+              title="Aspect ratio (FIT / FILL / 16:9 / 4:3)"
+            >
+              {aspectMode}
             </button>
           </div>
         </div>
 
-        {/* CENTER: 88px Play / Pause Circular Button */}
-        <div className="flex items-center justify-center my-auto">
+        {/* CENTER PLAY/PAUSE BIG BUTTON */}
+        <div className="flex items-center justify-center w-full pointer-events-auto">
           <button
-            onClick={togglePlayPause}
-            className="w-[88px] h-[88px] rounded-full bg-white flex items-center justify-center shadow-2xl transition-transform active:scale-95 hover:scale-105"
-            title={isPlaying ? "Pause" : "Play"}
-            aria-label={isPlaying ? "Pause" : "Play"}
+            onClick={togglePlay}
+            className="w-20 h-20 sm:w-22 sm:h-22 rounded-full bg-white text-zinc-900 shadow-2xl flex items-center justify-center hover:scale-105 active:scale-95 transition-transform"
+            title={isPlaying ? 'Pause' : 'Play'}
+            aria-label={isPlaying ? 'Pause' : 'Play'}
           >
             {isPlaying ? (
-              <Pause className="w-10 h-10 text-black fill-black" />
+              <Pause className="w-9 h-9 sm:w-10 sm:h-10 fill-current text-zinc-900" />
             ) : (
-              <Play className="w-10 h-10 text-black fill-black ml-1" />
+              <Play className="w-9 h-9 sm:w-10 sm:h-10 fill-current text-zinc-900 ml-1" />
             )}
           </button>
         </div>
 
         {/* BOTTOM CONTROLS BAR */}
-        <div className="w-full flex flex-col space-y-2">
-          {/* Controls Top Row */}
-          <div className="flex items-center justify-between text-white text-xs px-1">
-            {/* Left controls */}
-            <div className="flex items-center gap-3">
-              <span className="font-mono text-xs text-white/90">
-                {formatTime(positionSec)}
-              </span>
-
-              {/* Loop / Repeat Toggle */}
+        <div className="flex flex-col gap-2 w-full pointer-events-auto">
+          <div className="flex items-center justify-between">
+            {/* Left bottom controls */}
+            <div className="flex items-center gap-2">
               <button
-                onClick={() => setLoopEnabled(!loopEnabled)}
-                className={`p-1.5 rounded-md transition-colors ${
-                  loopEnabled ? 'text-[#059DFF]' : 'text-white hover:text-white/80'
-                }`}
-                title={loopEnabled ? "Repeat: On" : "Repeat: Off"}
-                aria-label="Repeat"
-              >
-                <Repeat className="w-4 h-4" />
-              </button>
-
-              {/* Volume toggle */}
-              <button
-                onClick={() => {
-                  if (videoRef.current) {
-                    const nextMute = !isMuted;
-                    videoRef.current.muted = nextMute;
-                    setIsMuted(nextMute);
-                  }
-                }}
+                onClick={toggleMute}
                 className="p-1.5 rounded-md text-white hover:text-white/80 transition-colors"
-                title={isMuted ? "Unmute" : "Mute"}
+                title={isMuted ? 'Unmute' : 'Mute'}
                 aria-label="Mute"
               >
-                {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+                {isMuted ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
+              </button>
+
+              <button
+                onClick={toggleFullscreen}
+                className="p-1.5 rounded-md text-white hover:text-white/80 transition-colors"
+                title={isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
+                aria-label="Fullscreen"
+              >
+                {isFullscreen ? <Minimize className="w-4 h-4" /> : <Maximize className="w-4 h-4" />}
               </button>
             </div>
 
-            {/* Right controls */}
-            <div className="flex items-center gap-3">
-              {/* Aspect Ratio Mode (FIT, FILL, 16:9, 4:3) */}
-              <button
-                onClick={cycleAspectRatio}
-                className="flex items-center gap-1 px-2 py-1 rounded bg-black/40 hover:bg-black/60 text-white text-[11px] font-medium backdrop-blur-sm transition-colors"
-                title={`Aspect Ratio: ${aspectMode}`}
-                aria-label="Aspect Ratio"
-              >
-                <Crop className="w-3.5 h-3.5" />
-                <span>{aspectMode}</span>
-              </button>
-
-              {/* Playback Settings Modal Trigger */}
+            {/* Right bottom controls */}
+            <div className="flex items-center gap-2.5">
               <button
                 onClick={() => {
                   setShowSettings(true);
@@ -539,7 +665,7 @@ export const PlaybackView: React.FC<PlaybackViewProps> = ({
         </div>
       </div>
 
-      {/* PLAYBACK SETTINGS MODAL (Matches Android PlaybackActivity.kt lines 500-600) */}
+      {/* PLAYBACK SETTINGS MODAL */}
       {showSettings && (
         <div
           className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
@@ -550,57 +676,58 @@ export const PlaybackView: React.FC<PlaybackViewProps> = ({
           <div className="w-full max-w-sm rounded-2xl bg-white text-zinc-900 p-5 shadow-2xl space-y-4">
             <div className="flex items-center justify-between border-b pb-3">
               <h3 className="font-bold text-sm tracking-wide text-zinc-900">
-                Playback Settings
+                Paramètres de lecture
               </h3>
               <button
                 onClick={() => setShowSettings(false)}
                 className="text-xs font-semibold text-zinc-600 hover:text-zinc-900 px-2 py-1 rounded"
               >
-                Close
+                Fermer
               </button>
             </div>
 
             {/* Speed Section */}
             <div className="space-y-2">
               <label className="block text-xs font-bold text-zinc-700">
-                Speed
+                Vitesse
               </label>
               <div className="grid grid-cols-3 gap-2">
                 {[0.5, 1.0, 1.25, 1.5, 2.0, 5.0].map((sp) => (
                   <button
                     key={sp}
-                    type="button"
                     onClick={() => {
                       setSelectedSpeed(sp);
-                      resetHideTimer();
+                      setShowSettings(false);
                     }}
-                    className={`py-2 text-xs font-semibold rounded-xl border transition-colors ${
+                    className={`py-2 text-xs rounded-xl border font-semibold transition-all ${
                       selectedSpeed === sp
-                        ? 'bg-[#059DFF] text-white border-[#059DFF]'
-                        : 'bg-zinc-100 text-zinc-800 border-zinc-200 hover:border-[#059DFF]'
+                        ? 'border-[#059DFF] bg-[#059DFF] text-white'
+                        : 'border-zinc-200 bg-zinc-50 text-zinc-700 hover:bg-zinc-100'
                     }`}
                   >
-                    {sp}x
+                    {sp === 1.0 ? 'Normale' : `${sp}x`}
                   </button>
                 ))}
               </div>
             </div>
 
             {/* Quality Section */}
-            <div className="space-y-2">
+            <div className="space-y-2 pt-2 border-t">
               <label className="block text-xs font-bold text-zinc-700">
-                Quality
+                Qualité du flux
               </label>
               <div className="grid grid-cols-3 gap-2">
-                {['Auto', 'Medium', 'Low'].map((q) => (
+                {['Auto', 'Moyenne', 'Basse'].map((q) => (
                   <button
                     key={q}
-                    type="button"
-                    onClick={() => handleApplyQuality(q)}
-                    className={`py-2 text-xs font-semibold rounded-xl border transition-colors ${
+                    onClick={() => {
+                      setSelectedQuality(q);
+                      setShowSettings(false);
+                    }}
+                    className={`py-2 text-xs rounded-xl border font-semibold transition-all ${
                       selectedQuality === q
-                        ? 'bg-[#059DFF] text-white border-[#059DFF]'
-                        : 'bg-zinc-100 text-zinc-800 border-zinc-200 hover:border-[#059DFF]'
+                        ? 'border-[#059DFF] bg-[#059DFF] text-white'
+                        : 'border-zinc-200 bg-zinc-50 text-zinc-700 hover:bg-zinc-100'
                     }`}
                   >
                     {q}
@@ -609,18 +736,41 @@ export const PlaybackView: React.FC<PlaybackViewProps> = ({
               </div>
             </div>
 
-            {/* Aspect Ratio section info */}
-            <div className="space-y-1.5 pt-1 text-xs text-zinc-500 border-t border-zinc-100">
-              <div className="flex justify-between">
-                <span>Display Mode:</span>
-                <span className="font-semibold text-zinc-800">{aspectMode}</span>
+            {/* Streaming Mode Toggle */}
+            <div className="space-y-2 pt-2 border-t">
+              <label className="block text-xs font-bold text-zinc-700">
+                Mode de connexion
+              </label>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  onClick={() => {
+                    setForcedMode('proxy');
+                    setPlaybackAttempt(prev => prev + 1);
+                    setShowSettings(false);
+                  }}
+                  className={`py-2 text-xs rounded-xl border font-semibold transition-all ${
+                    forcedMode === 'proxy'
+                      ? 'border-[#059DFF] bg-[#059DFF] text-white'
+                      : 'border-zinc-200 bg-zinc-50 text-zinc-700'
+                  }`}
+                >
+                  Proxy Sécurisé (HTTPS)
+                </button>
+                <button
+                  onClick={() => {
+                    setForcedMode('direct');
+                    setPlaybackAttempt(prev => prev + 1);
+                    setShowSettings(false);
+                  }}
+                  className={`py-2 text-xs rounded-xl border font-semibold transition-all ${
+                    forcedMode === 'direct'
+                      ? 'border-[#059DFF] bg-[#059DFF] text-white'
+                      : 'border-zinc-200 bg-zinc-50 text-zinc-700'
+                  }`}
+                >
+                  Direct (Non-proxifié)
+                </button>
               </div>
-              {userAgent && (
-                <div className="flex justify-between truncate">
-                  <span>User Agent:</span>
-                  <span className="font-mono text-[10px] text-zinc-600 truncate max-w-[150px]">{userAgent}</span>
-                </div>
-              )}
             </div>
           </div>
         </div>
